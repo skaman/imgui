@@ -89,6 +89,8 @@ typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, XINPUT_STATE*);
 static void ImGui_ImplWin32_InitPlatformInterface();
 static void ImGui_ImplWin32_ShutdownPlatformInterface();
 static void ImGui_ImplWin32_UpdateMonitors();
+static void ImGui_ImplWin32_SetWindowFocus(ImGuiViewport* viewport);
+static void ImGui_ImplWin32_ShowWindow(ImGuiViewport* viewport);
 
 struct ImGui_ImplWin32_Data
 {
@@ -100,6 +102,10 @@ struct ImGui_ImplWin32_Data
     INT64                       TicksPerSecond;
     ImGuiMouseCursor            LastMouseCursor;
     bool                        WantUpdateMonitors;
+
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+    HGLRC                       HgLrc;
+#endif //IMGUI_IMPL_WIN32_OPENGL3
 
 #ifndef IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
     bool                        HasGamepad;
@@ -122,7 +128,11 @@ static ImGui_ImplWin32_Data* ImGui_ImplWin32_GetBackendData()
 }
 
 // Functions
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+bool    ImGui_ImplWin32_Init(void* hwnd, void* hglrc)
+#else
 bool    ImGui_ImplWin32_Init(void* hwnd)
+#endif
 {
     ImGuiIO& io = ImGui::GetIO();
     IM_ASSERT(io.BackendPlatformUserData == nullptr && "Already initialized a platform backend!");
@@ -147,6 +157,10 @@ bool    ImGui_ImplWin32_Init(void* hwnd)
     bd->TicksPerSecond = perf_frequency;
     bd->Time = perf_counter;
     bd->LastMouseCursor = ImGuiMouseCursor_COUNT;
+
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+    bd->HgLrc = (HGLRC)hglrc;
+#endif //IMGUI_IMPL_WIN32_OPENGL3
 
     // Our mouse update function expect PlatformHandle to be filled for the main viewport
     ImGuiViewport* main_viewport = ImGui::GetMainViewport();
@@ -899,8 +913,23 @@ struct ImGui_ImplWin32_ViewportData
     bool    HwndOwned;
     DWORD   DwStyle;
     DWORD   DwExStyle;
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+    HDC     Hdc;
+    HGLRC   HgLrc;
+#endif
 
-    ImGui_ImplWin32_ViewportData() { Hwnd = nullptr; HwndOwned = false;  DwStyle = DwExStyle = 0; }
+    ImGui_ImplWin32_ViewportData()
+    {
+        Hwnd = nullptr;
+        HwndOwned = false;
+        DwStyle = 0;
+        DwExStyle = 0;
+
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+        Hdc = nullptr;
+        HgLrc = nullptr;
+#endif //IMGUI_IMPL_WIN32_OPENGL3
+    }
     ~ImGui_ImplWin32_ViewportData() { IM_ASSERT(Hwnd == nullptr); }
 };
 
@@ -942,6 +971,27 @@ static void ImGui_ImplWin32_CreateWindow(ImGuiViewport* viewport)
     vd->HwndOwned = true;
     viewport->PlatformRequestResize = false;
     viewport->PlatformHandle = viewport->PlatformHandleRaw = vd->Hwnd;
+
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+    vd->Hdc = GetDC(vd->Hwnd);
+    ImGui_ImplWin32_Data* bd = ImGui_ImplWin32_GetBackendData();
+
+    // Set pixel format to match base window
+    HDC Hdc = GetDC(bd->hWnd);
+    int pf = GetPixelFormat(Hdc);
+    PIXELFORMATDESCRIPTOR pfd;
+    DescribePixelFormat(Hdc, pf, sizeof(pfd), &pfd);
+    SetPixelFormat(vd->Hdc, pf, &pfd);
+
+    // Create OpenGL context for new window
+    vd->HgLrc = wglCreateContext(vd->Hdc);
+    wglMakeCurrent(vd->Hdc, vd->HgLrc);
+    wglShareLists(bd->HgLrc, vd->HgLrc);
+
+    // Present new window
+    ImGui_ImplWin32_SetWindowFocus(viewport);
+    ImGui_ImplWin32_ShowWindow(viewport);
+#endif //IMGUI_IMPL_WIN32_OPENGL3
 }
 
 static void ImGui_ImplWin32_DestroyWindow(ImGuiViewport* viewport)
@@ -956,7 +1006,13 @@ static void ImGui_ImplWin32_DestroyWindow(ImGuiViewport* viewport)
             ::SetCapture(bd->hWnd);
         }
         if (vd->Hwnd && vd->HwndOwned)
+        {
+            #ifdef IMGUI_IMPL_WIN32_OPENGL3
+            wglDeleteContext(vd->HgLrc);
+            #endif
+
             ::DestroyWindow(vd->Hwnd);
+        }
         vd->Hwnd = nullptr;
         IM_DELETE(vd);
     }
@@ -1116,6 +1172,21 @@ static void ImGui_ImplWin32_OnChangedViewport(ImGuiViewport* viewport)
 #endif
 }
 
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+static void ImGui_ImplWin32_RenderWindow(ImGuiViewport* viewport, void*)
+{
+    ImGui_ImplWin32_ViewportData* vd = (ImGui_ImplWin32_ViewportData*)viewport->PlatformUserData;
+    wglMakeCurrent(vd->Hdc, vd->HgLrc);
+}
+
+static void ImGui_ImplWin32_SwapBuffers(ImGuiViewport* viewport, void*)
+{
+    ImGui_ImplWin32_ViewportData* vd = (ImGui_ImplWin32_ViewportData*)viewport->PlatformUserData;
+    wglMakeCurrent(vd->Hdc, vd->HgLrc);
+    SwapBuffers(vd->Hdc);
+}
+#endif //IMGUI_IMPL_WIN32_OPENGL3
+
 static LRESULT CALLBACK ImGui_ImplWin32_WndProcHandler_PlatformWindow(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
@@ -1125,6 +1196,10 @@ static LRESULT CALLBACK ImGui_ImplWin32_WndProcHandler_PlatformWindow(HWND hWnd,
     {
         switch (msg)
         {
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+        case WM_ERASEBKGND:
+            return 0; // Prevent flickering on window invalidation
+#endif //IMGUI_IMPL_WIN32_OPENGL3
         case WM_CLOSE:
             viewport->PlatformRequestClose = true;
             return 0;
@@ -1188,6 +1263,11 @@ static void ImGui_ImplWin32_InitPlatformInterface()
     platform_io.Platform_UpdateWindow = ImGui_ImplWin32_UpdateWindow;
     platform_io.Platform_GetWindowDpiScale = ImGui_ImplWin32_GetWindowDpiScale; // FIXME-DPI
     platform_io.Platform_OnChangedViewport = ImGui_ImplWin32_OnChangedViewport; // FIXME-DPI
+
+#ifdef IMGUI_IMPL_WIN32_OPENGL3
+    platform_io.Platform_RenderWindow = ImGui_ImplWin32_RenderWindow;
+    platform_io.Platform_SwapBuffers = ImGui_ImplWin32_SwapBuffers;
+#endif //IMGUI_IMPL_WIN32_OPENGL3
 
     // Register main window handle (which is owned by the main application, not by us)
     // This is mostly for simplicity and consistency, so that our code (e.g. mouse handling etc.) can use same logic for main and secondary viewports.
