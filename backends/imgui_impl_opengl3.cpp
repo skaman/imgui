@@ -917,6 +917,11 @@ void    ImGui_ImplOpenGL3_DestroyDeviceObjects()
 
 static void ImGui_ImplOpenGL3_RenderWindow(ImGuiViewport* viewport, void*)
 {
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+
+    if (platform_io.Platform_PushOglContext)
+        platform_io.Platform_PushOglContext(viewport);
+
     if (!(viewport->Flags & ImGuiViewportFlags_NoRendererClear))
     {
         ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -924,6 +929,9 @@ static void ImGui_ImplOpenGL3_RenderWindow(ImGuiViewport* viewport, void*)
         glClear(GL_COLOR_BUFFER_BIT);
     }
     ImGui_ImplOpenGL3_RenderDrawData(viewport->DrawData);
+    
+    if (platform_io.Platform_PopOglContext)
+        platform_io.Platform_PopOglContext(viewport);
 }
 
 static void ImGui_ImplOpenGL3_InitPlatformInterface()
